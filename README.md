@@ -221,6 +221,12 @@ tests/                    unittest: regras, tags, estatisticas, telemetria da ap
 ci/github-actions-ci.yml CI (Actions, pronto p/ ativar)  .gitlab-ci.yml  CI (GitLab)
 ```
 
+> **Sobre a ativação do CI.** O YAML completo está em `ci/github-actions-ci.yml` (e a
+> variante GitLab em `.gitlab-ci.yml`). Ele não foi commitado em `.github/workflows/` porque a
+> integração usada nesta revisão de publicação não tem permissão para escrever `.github/` — o
+> único passo que falta para o pipeline passar a rodar na nuvem é copiar o arquivo para lá.
+> A execução que sustenta esta publicação é local: `make ci` → exit 0, 100 testes.
+
 ## Qualidade
 
 ```bash
