@@ -1,0 +1,145 @@
+# Prometheus - scrape config do ambiente local (docker compose).
+#
+# Nada aqui aponta para producao: os alvos sao servicos do docker-compose.yml
+# e todos os numeros que aparecem nos alertas sao sinteticos. A ideia e que o
+# arquivo sirva de template auditavel para um ambiente real, com o minimo de
+# surpresas: um job por fonte, labels padrao injetados por scrape_config e
+# nenhuma regra definida aqui (regras vivem em ./rules).
+#
+# Valide antes de subir:
+#   docker compose exec prometheus promtool check config /etc/prometheus/prometheus.yml
+#   docker compose exec prometheus promtool check rules /etc/prometheus/rules/*.yml
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  # `service` e `environment` sao as tags do esquema (ver otel/tagging.md).
+  # Elas entram no scrape para que qualquer metrica cruza com Loki e Tempo
+  # sem depender de nome de job.
+  external_labels:
+    service: prometheus
+    environment: local-sintetico
+    stack: observability-golden-signals
+
+rule_files:
+  - /etc/prometheus/rules/golden-signals.yml
+  - /etc/prometheus/rules/slo-burn-rate.yml
+  - /etc/prometheus/rules/infrastructure.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+      timeout: 10s
+
+scrape_configs:
+  - job_name: prometheus
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - prometheus:9090
+        labels:
+          service: prometheus
+          team: sre-core
+          environment: local-sintetico
+
+  # As quatro aplicacoes de exemplo publicam /metrics com as series de
+  # golden signals (http_requests_total, http_request_duration_seconds,
+  # process_*). Em producao isso vira file_sd/service discovery; o conjunto
+  # de labels e o mesmo.
+  - job_name: sample-app
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - sample-app:8080
+        labels:
+          service: checkout-api
+          journey: checkout
+          team: payments-core
+          environment: local-sintetico
+      - targets:
+          - auth-api:8080
+        labels:
+          service: auth-api
+          journey: login
+          team: identity
+          environment: local-sintetico
+      - targets:
+          - notification-worker:8080
+        labels:
+          service: notification-worker
+          journey: notificacao
+          team: messaging
+          environment: local-sintetico
+      - targets:
+          - search-api:8080
+        labels:
+          service: search-api
+          journey: descoberta
+          team: catalog
+          environment: local-sintetico
+
+  # O Collector exporta as metricas que ele mesmo recebe por OTLP
+  # (prometheus exporter na porta 8889) e a telemetria interna na 8888.
+  # Guardar o nome real do servico que gerou o span exige que o Collector
+  # propague os atributos de resource (ver otel/collector-config.yaml).
+  - job_name: otel-collector-otlp-metrics
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - otel-collector:8889
+        labels:
+          service: otel-collector
+          team: sre-core
+          environment: local-sintetico
+  - job_name: otel-collector-internal
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - otel-collector:8888
+        labels:
+          service: otel-collector
+          team: sre-core
+          environment: local-sintetico
+
+  - job_name: grafana
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - grafana:3000
+        labels:
+          service: grafana
+          team: sre-core
+          environment: local-sintetico
+
+  - job_name: loki
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - loki:3100
+        labels:
+          service: loki
+          team: sre-core
+          environment: local-sintetico
+
+  - job_name: tempo
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - tempo:3200
+        labels:
+          service: tempo
+          team: sre-core
+          environment: local-sintetico
+
+  - job_name: alertmanager
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - alertmanager:9093
+        labels:
+          service: alertmanager
+          team: sre-core
+          environment: local-sintetico

@@ -1,0 +1,20 @@
+# Sem dependencia de terceira parte, de proposito.
+#
+# A aplicacao de exemplo usa apenas a stdlib do Python 3.12: http.server, json,
+# random, threading, urllib, resource. Isso e uma restricao do projeto, nao uma
+# economia: quem clona este repositorio precisa conseguir rodar `python3
+# app/server.py` sem baixar wheels, sem proxy de artefato e sem index
+# privado, inclusive atras de um corporate egress chato.
+#
+# O que uma aplicacao real colocaria aqui, e por que nao esta:
+#
+#   opentelemetry-api/sdk   ->  substituido pelo exportador OTLP/JSON manual em
+#                             app/server.py (ver app/otel-sidecar.md para o
+#                             caminho de verdade)
+#   prometheus-client     ->  substituido pelo renderer minimalista em
+#                             Metrics.render(); a superficie exposta e igual
+#   structlog / logging   ->  json.dumps direto no stdout, uma linha por evento
+#
+# O arquivo fica versionado vazio para que o `pip install -r` do CI e do
+# Dockerfile continue funcionando como contrato: se alguem adicionar uma
+# dependencia aqui, o diff obriga a justificar no code review.

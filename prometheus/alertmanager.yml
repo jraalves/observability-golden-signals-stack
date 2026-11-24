@@ -1,0 +1,197 @@
+# Alertmanager - roteamento, inibicao e silences do ambiente local.
+#
+# Nenhum webhook aqui existe de verdade. `webhook-sintetico` aponta para
+# http://localhost:9999/hooks/... , que e um endpoint ficticio usado como
+# placeholder do lugar onde entraria Slack, PagerDuty ou o webhook interno de
+# um ambiente real. Em producao esses valores viriam de secret store e nunca de
+# um arquivo versionado: por isso este arquivo nao tem nenhuma credencial.
+#
+# Design de rota, na ordem em que importa:
+#   1. severity decide URGENCIA (acordar x ticket x observar);
+#   2. team decide DESTINO (quem acorda);
+#   3. signal e journey decidem o CONTEXTO agrupado, para um incidente virar
+#      uma notificacao e nao trinta.
+#
+#   docker compose exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
+
+global:
+  resolve_timeout: 5m
+
+# Janelas de silencio reutilizaveis. A ideia nao e "nao acordar ninguem": e nao
+# transformar degradacao lenta em pagina de madrugada, onde a acao correta e
+# abrir ticket com data e dormir.
+time_intervals:
+  - name: fora-do-horario-comercial
+    time_intervals:
+      - times:
+          - start_time: '18:00'
+            end_time: '09:00'
+        location: America/Sao_Paulo
+  - name: finais-de-semana
+    time_intervals:
+      - weekdays:
+          - 'saturday:sunday'
+
+inhibit_rules:
+  # critical inibe warning/info do MESMO alerta e servico: duas notificacoes do
+  # mesmo sintoma so custam atencao.
+  - source_matchers:
+      - 'severity="critical"'
+    target_matchers:
+      - 'severity=~"warning|info"'
+    equal:
+      - alertname
+      - service
+  - source_matchers:
+      - 'severity="warning"'
+    target_matchers:
+      - 'severity="info"'
+    equal:
+      - alertname
+      - service
+  # Sem dado, alerta de negocio e ruido: se o alvo nao esta sendo scrapado, o
+  # "p95 alto" que aparece em seguida e artefato da ausencia de serie.
+  - source_matchers:
+      - 'alertname="InfraTargetDown"'
+    target_matchers:
+      - 'signal=~"latency|errors|traffic"'
+    equal:
+      - service
+  # Cauda longa ja contem a mediana estourada: uma pagina basta.
+  - source_matchers:
+      - 'alertname="LatencyP99Critical"'
+    target_matchers:
+      - 'alertname="LatencyP95AboveObjective"'
+    equal:
+      - service
+      - journey
+  # O burn rapido e o mesmo fenotipo do burn medio, com melhor sinal.
+  - source_matchers:
+      - 'alertname="SloAvailabilityBurnRateFast"'
+    target_matchers:
+      - 'alertname=~"SloAvailabilityBurnRateMedium|SloAvailabilityBurnRateSlow"'
+    equal:
+      - service
+      - journey
+  # Saturacao de disco na esteira explica falhas de export: uma causa, um alerta.
+  - source_matchers:
+      - 'alertname="InfraDiskAlmostFull"'
+    target_matchers:
+      - 'alertname=~"InfraOtelExporterFailures|InfraLokiWriteFailures|InfraTempoFlushFailures"'
+    equal:
+      - service
+
+route:
+  receiver: webhook-sintetico
+  group_by:
+    - team
+    - signal
+    - service
+    - journey
+  # group_wait: espera para juntar alertas do mesmo grupo; group_interval:
+  # novas series do mesmo grupo; repeat_interval: reenvio enquanto continuar
+  # disparado. Estes tres numeros sao a diferenca entre "acordei uma vez" e
+  # "acordei dez vezes pelo mesmo motivo".
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - 'severity="critical"'
+      receiver: webhook-sintetico-page
+      group_wait: 10s
+      group_interval: 2m
+      repeat_interval: 1h
+      continue: false
+      routes:
+        # Pagina vai para o plantao do time dono do servico, nao para um canal
+        # unico de plataforma onde ninguem e accountable.
+        - matchers:
+            - 'team="payments-core"'
+          receiver: webhook-sintetico-team-pagamentos
+        - matchers:
+            - 'team="identity"'
+          receiver: webhook-sintetico-team-identity
+        - matchers:
+            - 'team=~"catalog|messaging"'
+          receiver: webhook-sintetico-team-produto
+    - matchers:
+        - 'action="ticket"'
+      receiver: webhook-sintetico-ticket
+      group_by:
+        - team
+        - service
+      group_wait: 2m
+      group_interval: 30m
+      repeat_interval: 24h
+      mute_time_intervals:
+        - fora-do-horario-comercial
+        - finais-de-semana
+    - matchers:
+        - 'action="freeze"'
+      receiver: webhook-sintetico-release-gate
+      group_by:
+        - team
+        - service
+      group_wait: 5m
+      repeat_interval: 24h
+    - matchers:
+        - 'action="observar"'
+      receiver: webhook-sintetico
+      group_by:
+        - team
+        - service
+      group_wait: 5m
+      group_interval: 1h
+      repeat_interval: 24h
+      mute_time_intervals:
+        - fora-do-horario-comercial
+
+receivers:
+  # FICTICIO: nao existe webhook em localhost:9999 neste ambiente. Serve para
+  # mostrar o payload e para ser substituido pela integracao real sem alterar
+  # as rotas acima.
+  - name: webhook-sintetico
+    webhook_configs:
+      - url: http://localhost:9999/hooks/sintetico-observabilidade
+        send_resolved: true
+        max_alerts: 20
+  - name: webhook-sintetico-page
+    webhook_configs:
+      - url: http://localhost:9999/hooks/sintetico-page
+        send_resolved: true
+        max_alerts: 10
+  - name: webhook-sintetico-team-pagamentos
+    webhook_configs:
+      - url: http://localhost:9999/hooks/sintetico-team/pagamentos-core
+        send_resolved: true
+  - name: webhook-sintetico-team-identity
+    webhook_configs:
+      - url: http://localhost:9999/hooks/sintetico-team/identity
+        send_resolved: true
+  - name: webhook-sintetico-team-produto
+    webhook_configs:
+      - url: http://localhost:9999/hooks/sintetico-team/produto
+        send_resolved: true
+  - name: webhook-sintetico-ticket
+    webhook_configs:
+      - url: http://localhost:9999/hooks/sintetico-ticket
+        send_resolved: false
+  - name: webhook-sintetico-release-gate
+    webhook_configs:
+      - url: http://localhost:9999/hooks/sintetico-release-gate
+        send_resolved: true
+
+# Silences: nao sao configuracao versionada, sao estado de runtime e por isso
+# ficam na API. O padrao do projeto e criar silence SEMPRE com author, comment
+# e duracao curta, e nunca sem o alerta correspondente resolvido ou em andamento.
+#
+#   docker compose exec alertmanager amtool silence add \
+#     alertname=ErrorRatioHigh service=checkout-api \
+#     --comment='deploy 2.14.0 em andamento, incidente #sintetico-1' \
+#     --author=sre-oncall --duration=30m
+#   docker compose exec alertmanager amtool silence status
+#   docker compose exec alertmanager amtool silence expire <id>
+#
+# Um silence de 8h sem comment e a forma mais rapida de transformar incidente em
+# outage descoberta pelo cliente.

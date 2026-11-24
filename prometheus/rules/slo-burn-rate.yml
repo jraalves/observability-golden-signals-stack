@@ -1,0 +1,190 @@
+# SLO com multi-window multi-burn-rate (padrao do Google SRE Workbook).
+#
+# Porque burn rate e nao threshold fixo: um threshold de "taxa de erro > 2%"
+# pagina no pior momento possivel para o cliente pequeno (2% de erro em 5
+# requests ao dia e irrelevante) e nao pagina quando o servico grande passa
+# horas em 1,9%. O burn rate pergunta outra coisa: quanta da quota mensal de
+# erro este comportamento esta consumindo, e em que velocidade.
+#
+# Finura escolhida (SLO sintetico de 99,5% de disponibilidade e p95 <= 1,2s,
+# budget de 0,5% => 21,6 min/mes):
+#   - pagina agora:  burn > 14,4x em janela de 1h  E 6h   (2% do budget em 1h)
+#   - pagina depois: burn > 6x    em janela de 6h  E 24h  (2,5% do budget em 6h)
+#   - ticket:        burn > 3x    em janela de 24h E 14d
+#   - ticket baixo:  burn > 1x    em janela de 24h E 14d  (consumo no ritmo)
+# A janela curta evita falso positivo por spike isolado; a longa evita que um
+# incidente de 40 minutos zere o budget sem ninguem ter acordado.
+#
+# Todos os numeros sao sinteticos e nao descrevem servico real algum.
+#
+#   docker compose exec prometheus promtool check rules /etc/prometheus/rules/slo-burn-rate.yml
+
+groups:
+  # Objetivos declarados pela propria aplicacao (metrica app_slo_* exposta em
+  # /metrics). Mudar o objetivo e mudar a env var da app: nenhuma expressao de
+  # alerta precisa ser reescrita.
+  - name: slo-objectives
+    interval: 60s
+    rules:
+      - record: slo:availability:objective_ratio
+        expr: 'avg by (service, journey) (app_slo_availability_ratio)'
+      - record: slo:latency:objective_seconds
+        expr: 'avg by (service, journey) (app_slo_latency_seconds)'
+      - record: slo:availability:error_budget:ratio
+        expr: '1 - slo:availability:objective_ratio'
+      - record: slo:latency:objective_ratio
+        expr: 'avg by (service, journey) (app_slo_latency_compliance_ratio)'
+      - record: slo:latency:error_budget:ratio
+        expr: '1 - slo:latency:objective_ratio'
+      # 14 dias tem 1.209.600 segundos: converte a taxa em volume de requests
+      # dentro da janela do budget, que e o numero que faz sentido em tabela.
+      - record: slo:requests:count14d
+        expr: 'service:http_requests:rate14d * 1209600'
+
+  # Ratios de erro de disponibilidade por janela curta e longa. As janelas de
+  # 5m/1h/6h/24h/14d sao fixas de proposito: sao exatamente as usadas nas
+  # combinacoes de multi-window.
+  - name: slo-windows-availability
+    interval: 60s
+    rules:
+      - record: slo:availability:error_ratio:5m
+        expr: 'service:http_error_ratio:rate5m'
+      - record: slo:availability:error_ratio:1h
+        expr: 'service:http_error_ratio:rate1h'
+      - record: slo:availability:error_ratio:6h
+        expr: 'service:http_error_ratio:rate6h'
+      - record: slo:availability:error_ratio:24h
+        expr: 'service:http_error_ratio:rate24h'
+      - record: slo:availability:error_ratio:14d
+        expr: 'service:http_error_ratio:rate14d'
+      - record: slo:availability:burn_rate:1h
+        expr: 'slo:availability:error_ratio:1h / slo:availability:error_budget:ratio'
+      - record: slo:availability:burn_rate:6h
+        expr: 'slo:availability:error_ratio:6h / slo:availability:error_budget:ratio'
+      - record: slo:availability:burn_rate:24h
+        expr: 'slo:availability:error_ratio:24h / slo:availability:error_budget:ratio'
+      - record: slo:availability:burn_rate:14d
+        expr: 'slo:availability:error_ratio:14d / slo:availability:error_budget:ratio'
+      - record: slo:availability:error_budget:remaining:ratio14d
+        expr: 'clamp(1 - slo:availability:burn_rate:14d, 0, 1)'
+
+  # Latencia: o "erro" do SLO de latencia e o request que estourou o objetivo.
+  # O bucket de histograma precisa conter a fronteira do SLO (1,2s aqui); sem
+  # esse bucket a conta e impossivel e o erro vira aproximacao de interpolacao.
+  - name: slo-windows-latency
+    interval: 60s
+    rules:
+      - record: slo:latency:compliant_ratio:1h
+        expr: 'sum by (service, journey) (rate(http_request_duration_seconds_bucket{le="1.2"}[1h])) / sum by (service, journey) (rate(http_request_duration_seconds_count[1h]))'
+      - record: slo:latency:compliant_ratio:6h
+        expr: 'sum by (service, journey) (rate(http_request_duration_seconds_bucket{le="1.2"}[6h])) / sum by (service, journey) (rate(http_request_duration_seconds_count[6h]))'
+      - record: slo:latency:compliant_ratio:24h
+        expr: 'sum by (service, journey) (rate(http_request_duration_seconds_bucket{le="1.2"}[24h])) / sum by (service, journey) (rate(http_request_duration_seconds_count[24h]))'
+      - record: slo:latency:compliant_ratio:14d
+        expr: 'sum by (service, journey) (rate(http_request_duration_seconds_bucket{le="1.2"}[14d])) / sum by (service, journey) (rate(http_request_duration_seconds_count[14d]))'
+      - record: slo:latency:bad_ratio:1h
+        expr: '1 - slo:latency:compliant_ratio:1h'
+      - record: slo:latency:bad_ratio:6h
+        expr: '1 - slo:latency:compliant_ratio:6h'
+      - record: slo:latency:bad_ratio:24h
+        expr: '1 - slo:latency:compliant_ratio:24h'
+      - record: slo:latency:bad_ratio:14d
+        expr: '1 - slo:latency:compliant_ratio:14d'
+      - record: slo:latency:burn_rate:1h
+        expr: 'slo:latency:bad_ratio:1h / slo:latency:error_budget:ratio'
+      - record: slo:latency:burn_rate:6h
+        expr: 'slo:latency:bad_ratio:6h / slo:latency:error_budget:ratio'
+      - record: slo:latency:burn_rate:24h
+        expr: 'slo:latency:bad_ratio:24h / slo:latency:error_budget:ratio'
+      - record: slo:latency:burn_rate:14d
+        expr: 'slo:latency:bad_ratio:14d / slo:latency:error_budget:ratio'
+      - record: slo:latency:error_budget:remaining:ratio14d
+        expr: 'clamp(1 - slo:latency:burn_rate:14d, 0, 1)'
+
+  - name: slo-alerts
+    interval: 60s
+    rules:
+      - alert: SloAvailabilityBurnRateFast
+        expr: '(slo:availability:burn_rate:1h > 14.4) and on (service, journey) (slo:availability:burn_rate:6h > 14.4)'
+        for: 2m
+        labels:
+          severity: critical
+          signal: slo
+          team: sre-core
+          action: page
+          slo: availability
+          window: '1h/6h'
+        annotations:
+          summary: 'queima de 2% do budget de erro por hora (burn > 14,4x)'
+          description: '{{ $labels.service }}/{{ $labels.journey}} consumindo budget a {{ $value | printf "%.1f" }}x o ritmo sustentavel. Esse alerta existe para acordar alguem antes que o SLO do mes quebre.'
+          dashboard_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/grafana/dashboards/slo-error-budget.json'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-taxa-erro.md'
+      - alert: SloAvailabilityBurnRateMedium
+        expr: '(slo:availability:burn_rate:6h > 6) and on (service, journey) (slo:availability:burn_rate:24h > 6)'
+        for: 15m
+        labels:
+          severity: critical
+          signal: slo
+          team: sre-core
+          action: page
+          slo: availability
+          window: '6h/24h'
+        annotations:
+          summary: 'burn de 6x sustentado por horas'
+          description: '{{ $labels.service }} esta a {{ $value | printf "%.1f" }}x o ritmo do budget nas ultimas 6h. Menos urgente que o de 1h, mas quebra o mes se continuar.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-taxa-erro.md'
+      - alert: SloAvailabilityBurnRateSlow
+        expr: '(slo:availability:burn_rate:24h > 3) and on (service, journey) (slo:availability:burn_rate:14d > 3)'
+        for: 30m
+        labels:
+          severity: warning
+          signal: slo
+          team: sre-core
+          action: ticket
+          slo: availability
+          window: '24h/14d'
+        annotations:
+          summary: 'burn de 3x em janela longa (trabalho de backlog)'
+          description: '{{ $labels.service }} consome budget 3x mais rapido do que deveria ha 24h. Nao e para acordar ninguem: e para abrir ticket com data.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-taxa-erro.md'
+      - alert: SloLatencyBurnRateFast
+        expr: '(slo:latency:burn_rate:1h > 14.4) and on (service, journey) (slo:latency:burn_rate:6h > 14.4)'
+        for: 5m
+        labels:
+          severity: critical
+          signal: slo
+          team: sre-core
+          action: page
+          slo: latency
+          window: '1h/6h'
+        annotations:
+          summary: 'SLO de latencia queimando budget rapido (p95 > 1,2s em massa)'
+          description: '{{ $labels.service }}/{{ $labels.journey }} com {{ $value | printf "%.1f" }}x o burn de latencia. A janela de referencia e o bucket le=1.2 declarado no histograma.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-latencia.md'
+      - alert: SloLatencyBurnRateSlow
+        expr: '(slo:latency:burn_rate:24h > 3) and on (service, journey) (slo:latency:burn_rate:14d > 3)'
+        for: 30m
+        labels:
+          severity: warning
+          signal: slo
+          team: sre-core
+          action: ticket
+          slo: latency
+          window: '24h/14d'
+        annotations:
+          summary: 'degradacao de latencia consumindo budget em janela longa'
+          description: 'Queima sustentada de budget de latencia em {{ $labels.service }}: {{ $value | printf "%.1f" }}x. Candidato a capacidade ou a query lenta, nao a incidente agudo.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-latencia.md'
+      - alert: SloErrorBudgetExhausted
+        expr: '(slo:availability:error_budget:remaining:ratio14d <= 0) and on (service, journey) (slo:availability:burn_rate:14d > 1)'
+        for: 60m
+        labels:
+          severity: warning
+          signal: slo
+          team: sre-core
+          action: freeze
+          slo: availability
+        annotations:
+          summary: 'budget de erro esgotado na janela de 14 dias'
+          description: '{{ $labels.service }} sem budget: congelar deploy de funcionalidade na jornada e trocar por confiabilidade ate o budget voltar. Gate de release, nao pagina.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-taxa-erro.md'

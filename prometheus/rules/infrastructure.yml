@@ -1,0 +1,261 @@
+# Saturacao da infraestrutura e da propria esteira de observabilidade.
+#
+# Duas coisas diferentes mora aqui:
+#   1. saturacao de CPU, memoria, disco e pods onde a stack roda (hostmetrics
+#      via OTel Collector no ambiente local; cAdvisor/kube-state-metrics no
+#      ambiente Kubernetes, com os nomes de metrica marcados);
+#   2. saúde da esteira: se o Collector, o Loki ou o proprio Prometheus vao mal,
+#      o proximo alerta que "nao disparou" pode ser ausencia de dado, nao
+#      ausencia de problema. Esse e o tipo de cegueira que so aparece tarde.
+#
+# Limiares sinteticos, sem relacao com ambiente real algum.
+#
+#   docker compose exec prometheus promtool check rules /etc/prometheus/rules/infrastructure.yml
+
+groups:
+  - name: infrastructure-host-recording
+    interval: 60s
+    rules:
+      # `up` agregado por job: o alerta de alvo caido precisa falar de job, nao
+      # de instancia efemera de container que renasce com outro endpoint.
+      - record: job:scrape_up:ratio
+        expr: 'avg by (job, service) (up)'
+      # hostmetrics do OTel Collector. `state!="idle"` e o caminho curto para
+      #utilizar CPU sem depender de contagem de cores.
+      - record: instance:system_cpu_utilization:ratio5m
+        expr: 'sum by (service, instance) (rate(system_cpu_time_seconds_total{state!="idle"}[5m])) / sum by (service, instance) (rate(system_cpu_time_seconds_total[5m]))'
+      - record: instance:system_memory_utilization:ratio
+        expr: 'sum by (service, instance) (system_memory_usage_bytes{state="used"}) / sum by (service, instance) (system_memory_usage_bytes)'
+      - record: instance:system_filesystem_utilization:ratio
+        expr: 'sum by (service, instance, mountpoint) (system_filesystem_usage_bytes{state="used"}) / sum by (service, instance, mountpoint) (system_filesystem_usage_bytes{state=~"used|free"})'
+      - record: instance:system_disk_io_utilization:ratio5m
+        expr: 'sum by (service, instance, device) (rate(system_disk_io_time_seconds_total[5m]))'
+      - record: instance:system_network_errors:rate5m
+        expr: 'sum by (service, instance) (rate(system_network_errors_total[5m]))'
+
+  - name: infrastructure-kubernetes-recording
+    interval: 60s
+    rules:
+      # Secoes usadas quando a stack roda em Kubernetes. No compose local elas
+      # ficam sem serie e os alertas correspondentes ficam inertes: e o
+      # comportamento esperado, nao um bug.
+      - record: pod_container:container_cpu:ratio
+        expr: 'sum by (namespace, pod, container) (rate(container_cpu_usage_seconds_total[5m])) / sum by (namespace, pod, container) (kube_pod_container_resource_limits{resource="cpu"})'
+      - record: pod_container:container_memory:ratio
+        expr: 'sum by (namespace, pod, container) (container_memory_working_set_bytes) / sum by (namespace, pod, container) (kube_pod_container_resource_limits{resource="memory"})'
+      - record: pod:kube_pod_container_restarts:increase1h
+        expr: 'sum by (namespace, pod, container) (increase(kube_pod_container_status_restarts_total[1h]))'
+      - record: pod:kube_pod_not_ready:count
+        expr: 'sum by (namespace, pod) (kube_pod_status_ready{condition="false"})'
+
+  - name: pipeline-self-monitoring-recording
+    interval: 60s
+    rules:
+      - record: pipeline:otel_export_failures:rate5m
+        expr: 'sum by (service, exporter) (rate(otelcol_exporter_send_failed_spans_total[5m]) + rate(otelcol_exporter_send_failed_log_records_total[5m]) + rate(otelcol_exporter_send_failed_metric_points_total[5m]))'
+      - record: pipeline:otel_enqueue_failures:rate5m
+        expr: 'sum by (service, exporter) (rate(otelcol_exporter_enqueue_failed_spans_total[5m]) + rate(otelcol_exporter_enqueue_failed_log_records_total[5m]))'
+      - record: pipeline:otel_dropped_records:rate5m
+        expr: 'sum by (service) (rate(otelcol_processor_dropped_log_records_total[5m]))'
+      - record: pipeline:loki_append_failures:rate5m
+        expr: 'sum by (service) (rate(loki_distributor_ingester_append_failures_total[5m]))'
+      - record: pipeline:tempo_flush_failures:rate5m
+        expr: 'sum by (service) (rate(tempo_ingester_failed_flushes_total[5m]))'
+      - record: pipeline:alertmanager_notify_failures:increase10m
+        expr: 'sum by (service, integration) (increase(alertmanager_notifications_failed_total[10m]))'
+
+  - name: infrastructure-alerts
+    interval: 60s
+    rules:
+      - alert: InfraTargetDown
+        expr: 'job:scrape_up:ratio < 1'
+        for: 5m
+        labels:
+          severity: warning
+          signal: infrastructure
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'scrape com alvos sem responder'
+          description: 'Job {{ $labels.job }} com {{ $value | printf "%.2f" }} dos alvos up ha 5 minutos. Sem serie nova, dashboard mente: validar a esteira antes de concluir que o servico esta bem.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraPipelineComponentDown
+        expr: 'job:scrape_up:ratio{job=~"loki|tempo|alertmanager|otel-collector.*"} < 1'
+        for: 3m
+        labels:
+          severity: critical
+          signal: infrastructure
+          team: sre-core
+          action: page
+        annotations:
+          summary: 'componente da esteira de observabilidade fora do ar'
+          description: '{{ $labels.job }} indisponivel: a janela de telemetria comeca a ficar esburacada. Recuperar coleta tem prioridade sobre investigar o incidente em curso.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraCpuSaturation
+        expr: 'instance:system_cpu_utilization:ratio5m > 0.90'
+        for: 15m
+        labels:
+          severity: warning
+          signal: saturation
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'CPU do host acima de 90% por 15 minutos'
+          description: 'Instancia {{ $labels.instance }} em {{ $value | printf "%.2f" }} de uso de CPU. Saturacao de host e diferente de saturacao de processo: checar quem mais divide a maquina.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraMemorySaturation
+        expr: 'instance:system_memory_utilization:ratio > 0.92'
+        for: 10m
+        labels:
+          severity: warning
+          signal: saturation
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'memoria do host acima de 92%'
+          description: '{{ $labels.instance }} em {{ $value | printf "%.2f" }}. Antes de OOMKill aparecer como misterio de estabilidade, olhe tendencia de 24h e nao o instante.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraDiskSpaceLow
+        expr: 'instance:system_filesystem_utilization:ratio > 0.85'
+        for: 20m
+        labels:
+          severity: warning
+          signal: saturation
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'disco acima de 85% (limite sintetico)'
+          description: 'Mount {{ $labels.mountpoint }} em {{ $value | printf "%.2f" }}. Em Loki e Tempo, disco cheio significa perda de dados, nao so erro de escrita.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraDiskAlmostFull
+        expr: 'instance:system_filesystem_utilization:ratio > 0.95'
+        for: 5m
+        labels:
+          severity: critical
+          signal: saturation
+          team: sre-core
+          action: page
+        annotations:
+          summary: 'disco acima de 95%: risco imediato de perda de telemetria'
+          description: '{{ $labels.mountpoint }} em {{ $value | printf "%.2f" }}. Acao aqui muda retencao ou expande volume: ambas exigem aprovacao humana registrada.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraOtelExporterFailures
+        expr: '(pipeline:otel_export_failures:rate5m + pipeline:otel_enqueue_failures:rate5m) > 0'
+        for: 5m
+        labels:
+          severity: warning
+          signal: infrastructure
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'Collector falhando ao exportar telemetria'
+          description: 'Exporter {{ $labels.exporter }} com {{ $value | printf "%.1f" }} falhas/s. Trace e log perdidos aqui nao voltam nunca mais: e dado que nao se reconstroi.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraOtelDataDropped
+        expr: 'pipeline:otel_dropped_records:rate5m > 0'
+        for: 2m
+        labels:
+          severity: critical
+          signal: infrastructure
+          team: sre-core
+          action: page
+        annotations:
+          summary: 'dados sendo descartados dentro do Collector'
+          description: '{{ $value | printf "%.1f" }} registros/s descartados. Tipicamente memory_limiter reagindo tarde demais: revisar limite e taxa de entrada.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraLokiWriteFailures
+        expr: 'pipeline:loki_append_failures:rate5m > 0.1'
+        for: 5m
+        labels:
+          severity: warning
+          signal: infrastructure
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'Loki recusando ingestao de logs'
+          description: '{{ $value | printf "%.2f" }} falhas/s de append. Rodar o runbook pelo lado do Loki (ingester) e nao pelo do emissor do log.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraTempoFlushFailures
+        expr: 'pipeline:tempo_flush_failures:rate5m > 0'
+        for: 5m
+        labels:
+          severity: warning
+          signal: infrastructure
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'Tempo com falha de flush de blocos de trace'
+          description: 'Traces recentes podem nao aparecer na busca por trace_id. Confirmar no painel de correlacao antes de concluir que o trace "nao existe".'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraAlertNotificationFailures
+        expr: 'pipeline:alertmanager_notify_failures:increase10m > 0'
+        for: 5m
+        labels:
+          severity: critical
+          signal: infrastructure
+          team: sre-core
+          action: page
+        annotations:
+          summary: 'Alertmanager falhou ao notificar'
+          description: 'Falha de entrega na integracao {{ $labels.integration }}: alerta pode ter existido sem ninguem saber. Reenvio manual exige aprovacao humana.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraRuleEvaluationFailures
+        expr: 'increase(prometheus_rule_evaluation_failures_total[10m]) > 0'
+        for: 1m
+        labels:
+          severity: warning
+          signal: infrastructure
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'rule file com avaliacao com erro'
+          description: 'Regra com erro de avaliacao: o alerta correspondente esta mudo. Checar PromQL invalida ou join que quebrou por ausencia de labels.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraPrometheusConfigReloadFailed
+        expr: 'prometheus_config_last_reload_successful != 1'
+        for: 2m
+        labels:
+          severity: warning
+          signal: infrastructure
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'ultima recarga de config do Prometheus falhou'
+          description: 'O Prometheus segue rodando com a config anterior: changes de scrape nao valem. E o tipo de erro silencioso que o validate.py tenta impedir antes do merge.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraTSDBHeadSeriesHigh
+        expr: 'prometheus_tsdb_head_series > 100000'
+        for: 30m
+        labels:
+          severity: warning
+          signal: saturation
+          team: sre-core
+          action: ticket
+        annotations:
+          summary: 'series ativas acima do teto sintetico (100k)'
+          description: '{{ $value | printf "%.0f" }} series na head. Cardinalidade alta e o vetor de custo numero 1 do Prometheus: ver docs/custos.md e o label que explodiu.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraPodRestartLoop
+        expr: 'pod:kube_pod_container_restarts:increase1h > 3'
+        for: 5m
+        labels:
+          severity: warning
+          signal: infrastructure
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'pod reiniciando em loop (Kubernetes)'
+          description: 'Pod {{ $labels.pod }} reiniciou {{ $value | printf "%.0f" }} vezes na ultima hora. Sem liveness correto, o restart mascara a causa: pegar o log da instancia anterior.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: InfraPodNotReady
+        expr: 'pod:kube_pod_not_ready:count > 0'
+        for: 10m
+        labels:
+          severity: warning
+          signal: infrastructure
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'pod sem readiness por mais de 10 minutos (Kubernetes)'
+          description: 'Endpoints vao sumir do servico antes de qualquer alerta de erro aparecer: readiness e a causa mais comum de "trafego caiu sem erro".'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-throughput.md'

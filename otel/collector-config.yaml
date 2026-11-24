@@ -1,0 +1,208 @@
+# OpenTelemetry Collector (distribuicao contrib) do ambiente local.
+#
+# Papel do Collector aqui, e so o que ele deve fazer:
+#   - ponto unico de ingestao OTLP para as quatro aplicacoes de exemplo;
+#   - normalizacao de atributos de resource no esquema do projeto
+#     (service.name, deployment.environment.name, journey, team) - ver
+#     otel/tagging.md para o por que;
+#   - exportar metricas para o prometheus exporter local (scrapeado na 8889),
+#     logs para o Loki e traces para o Tempo.
+#
+# Decisao deliberada: NAO hae sampler nem cardinality filter agressivo neste
+# arquivo. Em ambiente de estudo, dropar sinal barato demais mascara o efeito
+# colateral; o filtro de cardinalidade aparece no pipeline de metricas com
+# comentario explicando o que ele economiza.
+#
+#   otelcol-contrib validate --config=/etc/otelcol-contrib/config.yaml
+
+extensions:
+  health_check:
+    endpoint: '0.0.0.0:13133'
+  zpages:
+    listener: '0.0.0.0:55679'
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: '0.0.0.0:4317'
+      http:
+        endpoint: '0.0.0.0:4318'
+        cors:
+          allowed_origins:
+            - 'http://localhost:3000'
+
+  # Coleta do host onde o Collector roda. No compose isso enxerga o container,
+  # entao a utilidade e didatica: em Kubernetes o mesmo receiver roda como
+  # DaemonSet com /hostfs montado.
+  hostmetrics:
+    collection_interval: 30s
+    initial_delay: 5s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.time:
+            enabled: true
+      memory:
+      load:
+      disk:
+      filesystem:
+        root_path: /
+      network:
+
+  # As aplicacoes de exemplo escrevem JSON log em stdout e o Docker roteia para
+  # /var/log/containers (Kubernetes) ou para um volume compartilhado (aqui).
+  # O parser extrai trace_id do corpo, e isso que permite ao Loki montar o link
+  # para o Tempo sem indexar nada a mais.
+  filelog:
+    include:
+      - /var/log/app/*.log
+    start_at: beginning
+    include_file_path: true
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.timestamp
+          layout: '%Y-%m-%dT%H:%M:%S.%fZ'
+        on_error: send_quiet
+      - type: extract_metadata
+        context: attributes
+        source_field: service
+        metadata_field: service_name
+      - type: severity_parser
+        preset: none
+        from: attributes.level
+        mapping:
+          debug: DEBUG
+          info: INFO
+          warn: WARN
+          warning: WARN
+          error: ERROR
+          fatal: FATAL
+
+processors:
+  # Primeiro da cadeia, sempre: protege o processo de OOM quando a downstream
+  # fica lenta e o backpressure se acumula no Collector.
+  memory_limiter:
+    check_interval: 2s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+  # Atributos padrao do esquema. Rodar isto aqui, e nao dentro de cada app, e o
+  # que faz o esquema valer para linguagem que nenhuma.
+  attributes:
+    actions:
+      - key: service.instance.id
+        action: insert
+        from_attribute: process.pid
+      - key: stack
+        action: insert
+        value: observability-golden-signals
+      - key: environment
+        action: insert
+        value: local-sintetico
+      - key: cost.center
+        action: insert
+        value: sintetico-plataforma
+      - key: request_id
+        action: insert
+        from_attribute: http.request.header.x_request_id
+
+  # Controle de custo: metricas de histograma por `http.route` e `le` ja sao
+  # caros; uma serie por valor de `http.url` com query string e a forma classica
+  # de explodir cardinalidade. O filtro abaixo documenta o corte.
+  filter:
+    error_mode: ignore
+    metrics:
+      metric:
+        # Serie de runtime do proprio Collector que nao entra em nenhum painel e
+        # multiplica series a cada reinicio de container: corte no Collector, nao
+        # no Prometheus, para o custo nao ser pago duas vezes.
+        - 'metric.name == "otelcol_process_runtime_total_sys_memory_bytes"'
+
+  batch:
+    send_batch_size: 8192
+    send_batch_max_size: 10000
+    timeout: 5s
+
+exporters:
+  # Prometheus faz scrape neste listener (job otel-collector-otlp-metrics).
+  # ttl: 2m descarta series que pararam de receber ponto, o que limita o custo
+  # de series de curta vida em ambiente dinamico.
+  prometheus:
+    endpoint: '0.0.0.0:8889'
+    send_timestamps: true
+    metric_expiration: 2m
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  loki:
+    endpoint: 'http://loki:3100/otlp'
+    tls:
+      insecure: true
+    default_labels_enabled:
+      exporter: true
+      entry: false
+
+  otlp/tempo:
+    endpoint: 'tempo:4317'
+    tls:
+      insecure: true
+
+  # Saida em arquivo so para inspecao manual em ambiente local (docker compose
+  # exec otel-collector cat /tmp/otlp-traces-debug.log). Nao vai para pipeline
+  # de producao.
+  file/traces-debug:
+    path: /tmp/otlp-traces-debug.log
+    format: json
+    compression: none
+
+service:
+  extensions:
+    - health_check
+    - zpages
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: '0.0.0.0'
+                port: 8888
+  pipelines:
+    metrics:
+      receivers:
+        - otlp
+        - hostmetrics
+      processors:
+        - memory_limiter
+        - attributes
+        - filter
+        - batch
+      exporters:
+        - prometheus
+    logs:
+      receivers:
+        - otlp
+        - filelog
+      processors:
+        - memory_limiter
+        - attributes
+        - batch
+      exporters:
+        - loki
+    traces:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - attributes
+        - batch
+      exporters:
+        - otlp/tempo
+        # Local apenas: guardar os spans em arquivo permite inspecionar o payload
+        # OTLP sem depender do Tempo. Remover da pipeline em producao.
+        - file/traces-debug

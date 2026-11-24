@@ -1,0 +1,96 @@
+# Tempo (single-binary) como backend de traces do ambiente local.
+#
+# Storage local em disco, retencao curta, OTLP exposto para o Collector.
+# A decisao de usar Tempo em vez de Jaeger + Cassandra esta em
+# jaeger/README.md e no ADR-0001.
+#
+#   docker compose exec tempo /tempo check config /etc/tempo/tempo.yaml
+
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9096
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: '0.0.0.0:4317'
+        http:
+          endpoint: '0.0.0.0:4318'
+  log_received_traces: false
+
+ingester:
+  # Trace idle period curto: em ambiente de estudo o volume e baixo e esperar
+  # muito tempo para flushar significa perder trace ao reiniciar o container.
+  trace_idle_period: 10s
+  max_block_bytes: 104857600
+  max_block_duration: 10m
+  max_traces_per_user: 30000
+  concurrent_flushes: 4
+
+compactor:
+  compaction:
+    block_retention: 72h
+    compacted_block_retention: 10m
+    compaction_window: 1h
+    max_compaction_objects: 1000000
+
+metrics_generator:
+  # Gera as series RED (requests, errors, duration) a partir dos spans, que e o
+  # caminho pelo qual o painel de service map tem dados mesmo quando o app nao
+  # exporta metrica alguma.
+  ring:
+    kvstore:
+      store: memberlist
+  storage:
+    path: /var/tempo/metrics-generator
+    local:
+      path: /var/tempo/metrics-generator
+  processor:
+    filter:
+      error_mode: ignore
+    service_graphs:
+      enable_client_metrics: true
+    span_metrics:
+      exponential_histogram:
+        enabled: true
+  metrics_ttl: 15m
+  registry:
+    external_label_enabled: false
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+      flush_on_shutdown: true
+    local:
+      path: /var/tempo/traces
+  block:
+    index_search:
+      v2: true
+
+block_builder:
+  # Desligado neste ambiente: o modo single-binary faz o trabalho do builder.
+  enabled: false
+
+overrides:
+  max_bytes_per_trace: 5000000
+  ingestion_rate_strategy: local
+  forwarder_worker_pool_size: 24
+
+query_frontend:
+  search:
+    duration_slo: 5s
+    throughput_slo: 1MB
+  traceql_2:
+    engine: pressed
+  compaction:
+    enabled: true
+
+ingester_override:
+  max_instance_count: 1

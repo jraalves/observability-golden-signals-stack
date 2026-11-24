@@ -1,0 +1,523 @@
+# Stack de observabilidade completa em ambiente local: app de exemplo + OTel
+# Collector + Prometheus + Alertmanager + Grafana + Loki + Tempo (+ Jaeger como
+# alternativa documentada). Nenhum servico aqui contem credencial, e nenhum dado
+# gerado e real: toda carga vem de app/loadgen.py e e rotulada como sintetica.
+#
+# Subir:   docker compose up -d
+# Olhar:   http://localhost:3000  (Grafana anonima, sem login)
+# Parar:   docker compose down -v
+#
+# Sem a chave `version:`: ela esta obsoleta no Compose v2 e o Docker emite
+# warning. Todas as imagens vem de um registry explicito para o build ser
+# reproduzivel atras de proxy corporativo.
+#
+# Limitacao conhecida do Collector: a imagem oficial do otel/opentelemetry-collector-contrib
+# nao tem shell nem wget, entao ela fica sem healthcheck. O `depends_on` do
+# sample-app usa service_started e o smoke-test compensa com retry no 4318.
+
+networks:
+  observability:
+    name: observability-golden-signals
+    driver: bridge
+
+volumes:
+  prometheus-data:
+    name: obs-prometheus-data
+  alertmanager-data:
+    name: obs-alertmanager-data
+  grafana-data:
+    name: obs-grafana-data
+  loki-data:
+    name: obs-loki-data
+  tempo-data:
+    name: obs-tempo-data
+  # Volume compartilhado: os quatro servicos escrevem JSON log aqui e o
+  # receiver filelog do Collector le. Simula o /var/log/containers do Kubernetes.
+  app-logs:
+    name: obs-app-logs
+
+services:
+  prometheus:
+    image: docker.io/prom/prometheus:v2.53.0
+    container_name: obs-prometheus
+    expose:
+      - "9090"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      # Retencao sintetica curta: o ambiente local nao precisa guardar 15 dias
+      # de serie no disco do laptop, e mostrar o knob evita surpresa de espaco.
+      - '--storage.tsdb.retention.time=2d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-remote-write-receiver'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://prometheus:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - observability
+
+  alertmanager:
+    image: docker.io/prom/alertmanager:v0.27.0
+    container_name: obs-alertmanager
+    expose:
+      - "9093"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--cluster.listen-address='
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://alertmanager:9093/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - observability
+
+  loki:
+    image: docker.io/grafana/loki:3.1.0
+    container_name: obs-loki
+    expose:
+      - "3100"
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    command:
+      - '-config.file=/etc/loki/config.yaml'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://loki:3100/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - observability
+
+  tempo:
+    image: docker.io/grafana/tempo:2.6.0
+    container_name: obs-tempo
+    expose:
+      - "3200"
+      - "4317"
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    command:
+      - '-config.file=/etc/tempo/tempo.yaml'
+    stop_grace_period: 20s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://tempo:3200/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - observability
+
+  # Jaeger fica de pe como comparacao lado a lado com o Tempo: os dois tem UI de
+  # traco e o Collector pode exportar para qualquer um dos dois (um por vez).
+  # A justificativa de escolher o Tempo esta em jaeger/README.md e no ADR-0001.
+  jaeger:
+    image: docker.io/jaegertracing/all-in-one:1.59
+    container_name: obs-jaeger
+    environment:
+      SPAN_STORAGE_TYPE: memory
+      COLLECTOR_OTLP_ENABLED: 'true'
+      MEMORY_MAX_TRACES: '20000'
+    expose:
+      - "16686"
+      - "4317"
+      - "4318"
+    ports:
+      - "16686:16686"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://jaeger:16686/"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - observability
+
+  otel-collector:
+    image: docker.io/otel/opentelemetry-collector-contrib:0.108.0
+    container_name: obs-otel-collector
+    expose:
+      - "4317"
+      - "4318"
+      - "8888"
+      - "8889"
+      - "13133"
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
+    volumes:
+      - ./otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - app-logs:/var/log/app:ro
+    environment:
+      # Sem credencial aqui: endpoint e host interno do docker compose.
+      OTEL_SERVICE_NAME: otel-collector
+      OTEL_RESOURCE_ATTRIBUTES: 'service.name=otel-collector,deployment.environment.name=local-sintetico,team=sre-core'
+    command:
+      - '--config=/etc/otelcol-contrib/config.yaml'
+    restart: unless-stopped
+    networks:
+      - observability
+
+  grafana:
+    image: docker.io/grafana/grafana:11.2.0
+    container_name: obs-grafana
+    expose:
+      - "3000"
+    ports:
+      - "3000:3000"
+    environment:
+      # Ambiente local de estudo: acesso anonimo para ninguem precisar de
+      # senha versionada. Em producao isto e o contrario - SSO e RBAC.
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/golden-signals.json
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://grafana:3000/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+    networks:
+      - observability
+
+  # ------------------------------------------------------------------
+  # Aplicacoes de exemplo: mesmo codigo, quatro identidades. A unica
+  # diferenca entre elas e o conjunto de env vars, e e isso que o esquema
+  # de tags precisa capturar (otel/tagging.md).
+  # ------------------------------------------------------------------
+  # Nome do servico e `sample-app` (o mesmo codigo sobe os quatro); o label
+  # SERVICE=checkout-api e o que aparece nas series, nos logs e nos paineis.
+  sample-app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: obs-stack/sample-app:local
+    container_name: obs-checkout-api
+    environment:
+      SERVICE: checkout-api
+      JOURNEY: checkout
+      TEAM: payments-core
+      OWNER: pagamentos-dev
+      ENVIRONMENT: local-sintetico
+      VERSION: 1.4.2-sintetico
+      ERROR_RATE: '0.015'
+      CLIENT_ERROR_RATE: '0.01'
+      DEPENDENCY_ERROR_RATE: '0.01'
+      LATENCY_FACTOR: '1.0'
+      SEED: '2026'
+      PORT: '8080'
+      LOG_DIR: /var/log/app
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      SLO_AVAILABILITY: '0.995'
+      SLO_LATENCY_COMPLIANCE: '0.99'
+      DADOS: sinteticos
+    expose:
+      - "8080"
+    ports:
+      - "8082:8080"
+    volumes:
+      - app-logs:/var/log/app
+    restart: unless-stopped
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://sample-app:8080/health', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - observability
+
+  auth-api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: obs-stack/sample-app:local
+    container_name: obs-auth-api
+    environment:
+      SERVICE: auth-api
+      JOURNEY: login
+      TEAM: identity
+      OWNER: identidade-dev
+      ENVIRONMENT: local-sintetico
+      VERSION: 3.0.1-sintetico
+      ERROR_RATE: '0.005'
+      CLIENT_ERROR_RATE: '0.02'
+      DEPENDENCY_ERROR_RATE: '0.005'
+      LATENCY_FACTOR: '1.0'
+      SEED: '1717'
+      PORT: '8080'
+      LOG_DIR: /var/log/app
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      SLO_AVAILABILITY: '0.999'
+      SLO_LATENCY_COMPLIANCE: '0.99'
+      DADOS: sinteticos
+    expose:
+      - "8080"
+    ports:
+      - "8081:8080"
+    volumes:
+      - app-logs:/var/log/app
+    restart: unless-stopped
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://auth-api:8080/health', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - observability
+
+  search-api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: obs-stack/sample-app:local
+    container_name: obs-search-api
+    environment:
+      SERVICE: search-api
+      JOURNEY: descoberta
+      TEAM: catalog
+      OWNER: catalogo-dev
+      ENVIRONMENT: local-sintetico
+      VERSION: 0.9.7-sintetico
+      ERROR_RATE: '0.01'
+      CLIENT_ERROR_RATE: '0.01'
+      DEPENDENCY_ERROR_RATE: '0.02'
+      LATENCY_FACTOR: '0.6'
+      SEED: '909'
+      PORT: '8080'
+      LOG_DIR: /var/log/app
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      SLO_AVAILABILITY: '0.99'
+      SLO_LATENCY_COMPLIANCE: '0.95'
+      DADOS: sinteticos
+    expose:
+      - "8080"
+    ports:
+      - "8083:8080"
+    volumes:
+      - app-logs:/var/log/app
+    restart: unless-stopped
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://search-api:8080/health', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - observability
+
+  notification-worker:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: obs-stack/sample-app:local
+    container_name: obs-notification-worker
+    environment:
+      SERVICE: notification-worker
+      JOURNEY: notificacao
+      TEAM: messaging
+      OWNER: mensagens-dev
+      ENVIRONMENT: local-sintetico
+      VERSION: 2.2.0-sintetico
+      # Servico com budget mais folgado: a stack precisa de um exemplo em que o
+      # alerta de saturacao faz sentido e o de disponibilidade nao.
+      ERROR_RATE: '0.03'
+      CLIENT_ERROR_RATE: '0.005'
+      DEPENDENCY_ERROR_RATE: '0.04'
+      LATENCY_FACTOR: '1.8'
+      SEED: '555'
+      PORT: '8080'
+      LOG_DIR: /var/log/app
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      SLO_AVAILABILITY: '0.98'
+      SLO_LATENCY_COMPLIANCE: '0.9'
+      DADOS: sinteticos
+    expose:
+      - "8080"
+    ports:
+      - "8084:8080"
+    volumes:
+      - app-logs:/var/log/app
+    restart: unless-stopped
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://notification-worker:8080/health', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - observability
+
+  # ------------------------------------------------------------------
+  # Carga sintetica: tres geradores para dar serie a tres jornadas
+  # diferentes. Nenhum deles representa comportamento real de usuario.
+  # ------------------------------------------------------------------
+  load-generator:
+    image: docker.io/library/python:3.12-slim
+    container_name: obs-load-generator
+    working_dir: /src
+    volumes:
+      - ./app:/src:ro
+    environment:
+      JOURNEY: checkout
+      ENVIRONMENT: local-sintetico
+      AUTH_URL: http://auth-api:8080
+      CHECKOUT_URL: http://sample-app:8080
+      RATE: '4'
+      CONCURRENCY: '4'
+      SEED: '1337'
+      TIMEOUT: '3'
+    # A jornada de checkout encadeia /auth e /pay com o MESMO trace_id: e o que
+    # produz dado cross-service para o painel de correlacao de incidente.
+    command:
+      - 'python3'
+      - 'loadgen.py'
+      - '--step'
+      - 'http://auth-api:8080/auth'
+      - '--step'
+      - 'http://sample-app:8080/pay'
+      - '--rate'
+      - '4'
+      - '--report-every'
+      - '30'
+    healthcheck:
+      # Imagem python:3.12-slim nao tem wget: a sonda usa o proprio interpretador
+      # e confirma que o gerador ainda alcanca o alvo (rede + servico vivos).
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://sample-app:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 8s
+      retries: 4
+      start_period: 25s
+    restart: unless-stopped
+    depends_on:
+      - sample-app
+      - auth-api
+    networks:
+      - observability
+
+  load-generator-login:
+    image: docker.io/library/python:3.12-slim
+    container_name: obs-load-generator-login
+    working_dir: /src
+    volumes:
+      - ./app:/src:ro
+    environment:
+      JOURNEY: login
+      ENVIRONMENT: local-sintetico
+      AUTH_URL: http://auth-api:8080
+      CHECKOUT_URL: http://auth-api:8080
+      RATE: '6'
+      CONCURRENCY: '3'
+      SEED: '24'
+      TIMEOUT: '3'
+    command:
+      - 'python3'
+      - 'loadgen.py'
+      - '--step'
+      - 'http://auth-api:8080/auth'
+      - '--rate'
+      - '6'
+    healthcheck:
+      # Imagem python:3.12-slim nao tem wget: a sonda usa o proprio interpretador
+      # e confirma que o gerador ainda alcanca o alvo (rede + servico vivos).
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://auth-api:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 8s
+      retries: 4
+      start_period: 25s
+    restart: unless-stopped
+    depends_on:
+      - auth-api
+    networks:
+      - observability
+
+  load-generator-background:
+    image: docker.io/library/python:3.12-slim
+    container_name: obs-load-generator-background
+    working_dir: /src
+    volumes:
+      - ./app:/src:ro
+    environment:
+      JOURNEY: descoberta
+      ENVIRONMENT: local-sintetico
+      RATE: '2'
+      SEED: '88'
+    command:
+      - 'python3'
+      - 'loadgen.py'
+      - '--step'
+      - 'http://search-api:8080/auth'
+      - '--step'
+      - 'http://notification-worker:8080/pay'
+      - '--rate'
+      - '2'
+    healthcheck:
+      # Imagem python:3.12-slim nao tem wget: a sonda usa o proprio interpretador
+      # e confirma que o gerador ainda alcanca o alvo (rede + servico vivos).
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://search-api:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 8s
+      retries: 4
+      start_period: 25s
+    restart: unless-stopped
+    depends_on:
+      - search-api
+      - notification-worker
+    networks:
+      - observability

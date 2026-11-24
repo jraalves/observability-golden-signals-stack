@@ -1,0 +1,37 @@
+# CI equivalente ao .github/workflows/ci.yml: mesma ordem, mesmos comandos,
+# nenhum segredo. Ter os dois arquivos e parte do estudo - a pipeline nao e o
+# produto, o contrato versionado e que e o produto.
+stages:
+  - verificar
+
+default:
+  image: python:3.12-slim
+  interruptible: true
+
+qualidade:
+  stage: verificar
+  timeout: 15m
+  variables:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PORT: "18080"
+  before_script:
+    - python3 -V
+    - bash --version | head -1
+  script:
+    # contrato: a app de exemplo e stdlib apenas
+    - |
+      python3 - <<'PY'
+      linhas = [l.strip() for l in open("app/requirements.txt", encoding="utf-8")]
+      ativas = [l for l in linhas if l and not l.startswith("#")]
+      print("app/requirements.txt linhas ativas:", len(ativas))
+      raise SystemExit(1 if ativas else 0)
+      PY
+    - python3 -m py_compile app/*.py scripts/*.py tests/*.py
+    - python3 scripts/validate.py
+    - python3 scripts/custo-cardinalidade.py --check
+    - python3 -m unittest discover -s tests -v
+    - bash scripts/smoke-test.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH'

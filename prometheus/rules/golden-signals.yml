@@ -1,0 +1,279 @@
+# Golden signals: latency, traffic, errors, saturation.
+#
+# Duas camadas, de proposito:
+#   1. recording rules agregam o histograma da aplicacao em p50/p95/p99 por
+#      servico e jornada, mais taxas de request e de erro. Alertas nunca
+#      chamam histogram_quantile sobre o bucket cru: reavaliar isso a cada
+#      15s, multiplicado por dezenas de alertas, e custo puro de CPU do
+#      Prometheus sem ganho de deteccao.
+#   2. alertas por familia de sinal, comparando com o objetivo que a propria
+#      aplicacao declara (app_slo_latency_seconds / app_slo_availability_ratio),
+#      para que mudar o SLO nao exija reescrever a expressao do alerta.
+#
+# TODOS os numeros deste arquivo sao sinteticos: as aplicacoes de exemplo
+# declaram objetivo de 99,5% de disponibilidade e p95 de 1,2s. Isso nao e
+# contrato de servico real de nada que exista fora deste repositorio.
+#
+# Checagem local:
+#   docker compose exec prometheus promtool check rules /etc/prometheus/rules/golden-signals.yml
+
+groups:
+  - name: golden-signals-traffic
+    interval: 30s
+    rules:
+      - record: service:http_requests:rate1m
+        expr: 'sum by (service, journey) (rate(http_requests_total[1m]))'
+      - record: service:http_requests:rate5m
+        expr: 'sum by (service, journey) (rate(http_requests_total[5m]))'
+      - record: service:http_requests:rate30m
+        expr: 'sum by (service, journey) (rate(http_requests_total[30m]))'
+      - record: service:http_requests:rate1h
+        expr: 'sum by (service, journey) (rate(http_requests_total[1h]))'
+      - record: service:http_requests:rate6h
+        expr: 'sum by (service, journey) (rate(http_requests_total[6h]))'
+      - record: service:http_requests:rate24h
+        expr: 'sum by (service, journey) (rate(http_requests_total[24h]))'
+      - record: service:http_requests:rate14d
+        expr: 'sum by (service, journey) (rate(http_requests_total[14d]))'
+      # Trafego tambem e visto por rota: a jornada pode parecer saudavel
+      # enquanto um endpoint especifico morre em silencio.
+      - record: route:http_requests:rate5m
+        expr: 'sum by (service, journey, route) (rate(http_requests_total[5m]))'
+
+  - name: golden-signals-errors
+    interval: 30s
+    rules:
+      - record: service:http_errors:rate5m
+        expr: 'sum by (service, journey) (rate(http_requests_total{status_class="5xx"}[5m]))'
+      - record: service:http_errors:rate1h
+        expr: 'sum by (service, journey) (rate(http_requests_total{status_class="5xx"}[1h]))'
+      - record: service:http_errors:rate6h
+        expr: 'sum by (service, journey) (rate(http_requests_total{status_class="5xx"}[6h]))'
+      - record: service:http_errors:rate24h
+        expr: 'sum by (service, journey) (rate(http_requests_total{status_class="5xx"}[24h]))'
+      - record: service:http_errors:rate14d
+        expr: 'sum by (service, journey) (rate(http_requests_total{status_class="5xx"}[14d]))'
+      - record: service:http_error_ratio:rate5m
+        expr: 'service:http_errors:rate5m / service:http_requests:rate5m'
+      - record: service:http_error_ratio:rate1h
+        expr: 'service:http_errors:rate1h / service:http_requests:rate1h'
+      - record: service:http_error_ratio:rate6h
+        expr: 'service:http_errors:rate6h / service:http_requests:rate6h'
+      - record: service:http_error_ratio:rate24h
+        expr: 'service:http_errors:rate24h / service:http_requests:rate24h'
+      - record: service:http_error_ratio:rate14d
+        expr: 'service:http_error_ratio:rate14d / service:http_requests:rate14d'
+      - record: route:http_error_ratio:rate5m
+        expr: 'sum by (service, journey, route) (rate(http_requests_total{status_class="5xx"}[5m])) / sum by (service, journey, route) (rate(http_requests_total[5m]))'
+      - record: route:http_errors:rate5m
+        expr: 'sum by (service, journey, route, status) (rate(http_requests_total{status_class="5xx"}[5m]))'
+      - record: service:dependency_error_ratio:rate5m
+        expr: 'sum by (service, journey, dependency) (rate(dependency_requests_total{status_class="5xx"}[5m])) / sum by (service, journey, dependency) (rate(dependency_requests_total[5m]))'
+      - record: service:dependency_error_rate:rate5m
+        expr: 'sum by (service, journey, dependency) (rate(dependency_requests_total{status_class="5xx"}[5m]))'
+
+  - name: golden-signals-latency
+    interval: 30s
+    rules:
+      - record: service:http_request_duration_seconds:p50_5m
+        expr: 'histogram_quantile(0.50, sum by (le, service, journey) (rate(http_request_duration_seconds_bucket[5m])))'
+      - record: service:http_request_duration_seconds:p95_5m
+        expr: 'histogram_quantile(0.95, sum by (le, service, journey) (rate(http_request_duration_seconds_bucket[5m])))'
+      - record: service:http_request_duration_seconds:p99_5m
+        expr: 'histogram_quantile(0.99, sum by (le, service, journey) (rate(http_request_duration_seconds_bucket[5m])))'
+      - record: service:http_request_duration_seconds:p95_1h
+        expr: 'histogram_quantile(0.95, sum by (le, service, journey) (rate(http_request_duration_seconds_bucket[1h])))'
+      - record: service:http_request_duration_seconds:sum_rate5m
+        expr: 'sum by (service, journey) (rate(http_request_duration_seconds_sum[5m]))'
+      - record: service:http_request_duration_seconds:count_rate5m
+        expr: 'sum by (service, journey) (rate(http_request_duration_seconds_count[5m]))'
+      - record: service:http_request_duration_seconds:avg_5m
+        expr: 'service:http_request_duration_seconds:sum_rate5m / service:http_request_duration_seconds:count_rate5m'
+      - record: route:http_request_duration_seconds:p95_5m
+        expr: 'histogram_quantile(0.95, sum by (le, service, journey, route) (rate(http_request_duration_seconds_bucket[5m])))'
+      - record: service:dependency_latency_p95_5m
+        expr: 'histogram_quantile(0.95, sum by (le, service, journey, dependency) (rate(dependency_request_duration_seconds_bucket[5m])))'
+
+  - name: golden-signals-saturation
+    interval: 30s
+    rules:
+      - record: service:process_cpu:cores5m
+        expr: 'sum by (service, journey) (rate(process_cpu_seconds_total[5m]))'
+      - record: service:process_memory:bytes
+        expr: 'max by (service, journey) (process_resident_memory_bytes)'
+      - record: service:process_open_fds:ratio
+        expr: 'max by (service, journey) (process_open_file_descriptors) / max by (service, journey) (process_max_file_descriptors)'
+      - record: service:http_requests:in_flight
+        expr: 'sum by (service, journey) (http_requests_in_flight)'
+      # Concorrencia contra a capacidade declarada e a forma mais barata de ver
+      # fila se formando antes de virar latencia. Capacidade sintetica: 8 workers.
+      - record: service:http_requests:queue_pressure
+        expr: 'service:http_requests:in_flight / 8'
+
+  - name: golden-signals-alerts
+    interval: 30s
+    rules:
+      # ---- LATENCIA -------------------------------------------------------
+      - alert: LatencyP95AboveObjective
+        expr: 'service:http_request_duration_seconds:p95_5m / on (service, journey) slo:latency:objective_seconds > 1.25'
+        for: 10m
+        labels:
+          severity: warning
+          signal: latency
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'p95 acima de 1,25x do objetivo por mais de 10 minutos'
+          description: 'Servico {{ $labels.service }} (jornada {{ $labels.journey }}) com p95 {{ $value | printf "%.3f" }}x o objetivo. Custo de verificacao baixo: comecar pelo painel de golden signals.'
+          dashboard_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/grafana/dashboards/golden-signals.json'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-latencia.md'
+      - alert: LatencyP99Critical
+        expr: '(service:http_request_duration_seconds:p99_5m / on (service, journey) slo:latency:objective_seconds > 2.5) and on (service, journey) (service:http_requests:rate5m > 0.2)'
+        for: 5m
+        labels:
+          severity: critical
+          signal: latency
+          team: sre-core
+          action: page
+        annotations:
+          summary: 'p99 acima de 2,5x do objetivo com trafego relevante'
+          description: 'Cauda longa em {{ $labels.service }}: p99 em {{ $value | printf "%.2f" }}x o objetivo. Confirmar se o gargalo e o proprio servico ou uma dependencia antes de escalar.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-latencia.md'
+      - alert: LatencyDependencyDominant
+        expr: '(service:dependency_latency_p95_5m / on (service, journey) slo:latency:objective_seconds > 1.5) and on (service, journey) (service:http_request_duration_seconds:p95_5m / on (service, journey) slo:latency:objective_seconds > 1)'
+        for: 15m
+        labels:
+          severity: warning
+          signal: latency
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'cauda de dependencia dominando a latencia ponta a ponta'
+          description: 'Em {{ $labels.service }} a latencia de dependencia esta em {{ $value | printf "%.3f" }}x o objetivo. Escalar com um trace_id de exemplo, nao com a media.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-latencia.md'
+
+      # ---- TRAFFIC --------------------------------------------------------
+      - alert: TrafficDropAgainstBaseline
+        expr: '(service:http_requests:rate5m / on (service, journey) service:http_requests:rate30m < 0.25) and on (service, journey) (service:http_requests:rate30m > 0.5)'
+        for: 10m
+        labels:
+          severity: warning
+          signal: traffic
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'trafego abaixo de 25% da baseline de 30 minutos'
+          description: '{{ $labels.service }} recebendo {{ $value | printf "%.2f" }}x a propria baseline. Queda de trafego costuma ser falha monte da cadeia, nao do servico.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-throughput.md'
+      - alert: TrafficSurge
+        expr: 'service:http_requests:rate5m / on (service, journey) service:http_requests:rate30m > 3'
+        for: 5m
+        labels:
+          severity: info
+          signal: traffic
+          team: sre-core
+          action: observar
+        annotations:
+          summary: 'pico de trafego acima de 3x a baseline'
+          description: '{{ $labels.service }} com {{ $value | printf "%.1f" }}x a baseline. Verificar se e campanha, bot ou retry storm de cliente com timeout curto.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-throughput.md'
+      - alert: TrafficZeroWithRecentHistory
+        expr: '(service:http_requests:rate5m == 0) and on (service, journey) (service:http_requests:rate1h > 0.1)'
+        for: 5m
+        labels:
+          severity: critical
+          signal: traffic
+          team: sre-core
+          action: page
+        annotations:
+          summary: 'servico parou de receber requests'
+          description: '{{ $labels.service }} com taxa zero por 5 minutos tendo historico na ultima hora. Checar health check do balanceador e se a instancia esta de pe.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-throughput.md'
+
+      # ---- ERRORS ---------------------------------------------------------
+      - alert: ErrorRatioHigh
+        expr: '(service:http_error_ratio:rate5m > 0.02) and on (service, journey) (service:http_requests:rate5m > 0.1)'
+        for: 10m
+        labels:
+          severity: warning
+          signal: errors
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'taxa de erro acima de 2% (threshold sintetico)'
+          description: '{{ $labels.service }} com {{ $value | printf "%.3f" }} de proporcao de 5xx. Primeiro passo: separar erro nosso de erro de dependencia.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-taxa-erro.md'
+      - alert: ErrorRateCritical
+        expr: '(service:http_error_ratio:rate5m > 0.05) and on (service, journey) (service:http_requests:rate5m > 0.1)'
+        for: 5m
+        labels:
+          severity: critical
+          signal: errors
+          team: sre-core
+          action: page
+        annotations:
+          summary: 'taxa de erro acima de 5% (threshold sintetico)'
+          description: 'Erro sustentado em {{ $labels.service }}/{{ $labels.journey }}: {{ $value | printf "%.3f" }}. Corrigir erro antes de otimizar latencia: erro rapido continua sendo erro.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-taxa-erro.md'
+      - alert: DependencyErrorRatioHigh
+        expr: '(service:dependency_error_ratio:rate5m > 0.05) and on (service, journey, dependency) (service:dependency_error_rate:rate5m > 0.02)'
+        for: 10m
+        labels:
+          severity: warning
+          signal: errors
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'chamada de dependencia acumulando erros'
+          description: 'Dependencia {{ $labels.dependency }} com {{ $value | printf "%.3f" }} de erros vista de {{ $labels.service }}. Nomear a dependencia no titulo do incidente.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-taxa-erro.md'
+
+      # ---- SATURATION -----------------------------------------------------
+      - alert: SaturationFileDescriptorsHigh
+        expr: 'service:process_open_fds:ratio > 0.75'
+        for: 15m
+        labels:
+          severity: warning
+          signal: saturation
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: '75% dos descritores de arquivo consumidos (limite sintetico)'
+          description: '{{ $labels.service }} em {{ $value | printf "%.2f" }} do limite de FDs. FD crescendo sem teto quase sempre e conexao nao devolvida ao pool.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: SaturationMemoryNearLimit
+        expr: 'service:process_memory:bytes > 3.2e+09'
+        for: 10m
+        labels:
+          severity: warning
+          signal: saturation
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'processo acima de 3,2 GiB (limite sintetico de 4 GiB)'
+          description: '{{ $labels.service }} usando {{ $value | printf "%.2e" }} bytes. Comparar com a baseline de 24h antes de reiniciar: reinicio apaga a evidencia.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: SaturationQueuePressureCritical
+        expr: '(service:http_requests:queue_pressure > 1) and on (service, journey) (service:http_request_duration_seconds:p95_5m / on (service, journey) slo:latency:objective_seconds > 1)'
+        for: 5m
+        labels:
+          severity: critical
+          signal: saturation
+          team: sre-core
+          action: page
+        annotations:
+          summary: 'concorrencia acima da capacidade com latencia piorando'
+          description: 'Fila em {{ $labels.service }}: pressao {{ $value | printf "%.2f" }} com p95 acima do objetivo. Saturacao mais latencia e o padrao classico de capacidade esgotada.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'
+      - alert: SaturationCpuAboveLimit
+        expr: '(service:process_cpu:cores5m > 0.85) and on (service, journey) (service:http_requests:rate5m > 0.2)'
+        for: 15m
+        labels:
+          severity: warning
+          signal: saturation
+          team: sre-core
+          action: triagem
+        annotations:
+          summary: 'processo acima de 0,85 core (limite sintetico de 1 core)'
+          description: 'CPU de {{ $labels.service }} em {{ $value | printf "%.2f" }} cores. Se a latencia subiu junto, o gargalo e computacional, nao de rede.'
+          runbook_url: 'https://github.com/jraalves/observability-golden-signals-stack/blob/main/runbooks/rb-saturacao.md'

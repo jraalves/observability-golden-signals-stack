@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Ambientes locais de dados sinteticos (o volume do compose e nomeado, o resto nao)
+/data/
+/loki-data/
+/tempo-data/
+/prometheus-data/
+/grafana-data/
+*.log
+/logs/
+/tmp/
+/smoke-*.log
+
+# Resultado de execucao: o relatorio vive no PR, nao no historico
+/reports/
+/results/
+/coverage
+
+# Editores e SO
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Nada de credencial aqui, nunca (ver SECURITY.md)
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+secrets.yaml
+values-secret*.yaml

@@ -1,0 +1,50 @@
+# Datasources do Grafana via arquivo: o painel nunca depende de alguem criar a
+# conexao na UI, e o diff de datasource aparece em code review.
+#
+# `uid` fixo e obrigatorio neste projeto - o JSON dos dashboards referencia o
+# datasource pelo uid. Sem uid estavel, clonar o ambiente quebra todos os
+# paineis de uma vez. Nenhum segredo aqui: o ambiente local e sem autenticacao.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+      manageAlerts: false
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+      timeout: 60
+      # Derivacao de trace_id no level do painel (correlacao-incidente.json);
+      # aqui fica só o hint de que o backend de trace parceiro e o Tempo.
+      derivedFields: []
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      httpMethod: GET
+      serviceMap:
+        datasourceUid: prometheus
+      traceqlEditor:
+        showRunButton: true
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki

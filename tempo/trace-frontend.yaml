@@ -1,0 +1,45 @@
+# Overlay do query-frontend do Tempo para ambiente com volume real de traces.
+#
+# Este arquivo documenta a configuracao do componente que decide onde cada
+# busca de trace bate (ingester ativo, bloco compactado ou store de objeto) e
+# como as buscas longas sao paralelizadas. No ambiente local os mesmos blocos
+# estao aplicados dentro de tempo/tempo.yaml, porque o single-binary sobe todos
+# os papeis; aqui eles ficam separados para leitura e para o diff de capacity
+# planning quando a stack sai do laptop.
+#
+# Referencia de componente: tempo query-frontend (modo separado do ingester).
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9096
+  log_level: warn
+
+query_frontend:
+  # Busca por trace_id e a query que o runbook executa durante incidente: o SLO
+  # dela e mais curto que o de search, porque ninguem investiga com 30s de espera.
+  trace_by_id:
+    strategy: 'trace-by-id-quick'
+  search:
+    duration_slo: 5s
+    throughput_slo: 1MB
+    max_outstanding_requests: 50
+  traceql_2:
+    # Engine 'pressed' evita materializar todos os spans no backend: TraceQL
+    # roda perto dos dados, que e o que torna viavel perguntar por atributo.
+    engine: pressed
+  metrics:
+    duration_slo: 30s
+    throughput_slo: 4MB
+  compaction:
+    # Compacta spans por bloco antes de devolver: reduz payload, aumenta
+    # latencia do primeiro byte. Para o painel de service map vale o trade-off.
+    enabled: true
+  # Limite de resultados por busca: busca larga demais em Tempo e a forma mais
+  # facil de transformar um painel de incidente em negacao de servico interna.
+  max_result_window: 24h
+
+tagmap:
+  # Bloco do query-frontend: mapa de tags em memoria, com limite de
+  # cardinalidade explicito para a busca por atributo nao virar DoS interno.
+  memory_cache_max_bytes: 209715200
+  ttl: 15m

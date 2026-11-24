@@ -1,0 +1,17 @@
+# Provider de paineis: le o JSON versionado no repositorio. `updateIntervalSeconds`
+# faz o Grafana pegar mudanca feita no arquivo sem reiniciar o container, o que
+# deixa o fluxo de editar painel == editar codigo == commit.
+apiVersion: 1
+
+providers:
+  - name: observability-golden-signals
+    orgId: 1
+    folder: Observabilidade
+    folderUid: obs-golden-signals
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
