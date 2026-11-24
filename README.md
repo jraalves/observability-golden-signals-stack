@@ -218,7 +218,7 @@ docs/decisoes/            ADR-0001 a ADR-0006
 docs/custos.md            custo de cardinalidade
 scripts/                  validate.py, miniyaml.py, custo-cardinalidade.py, smoke-test.sh
 tests/                    unittest: regras, tags, estatisticas, telemetria da app
-.github/workflows/ci.yml  CI (GitHub Actions)   .gitlab-ci.yml  CI equivalente (GitLab)
+ci/github-actions-ci.yml CI (Actions, pronto p/ ativar)  .gitlab-ci.yml  CI (GitLab)
 ```
 
 ## Qualidade
@@ -232,7 +232,7 @@ python3 scripts/custo-cardinalidade.py --check
 
 O validador não usa biblioteca externa: o subconjunto YAML é lido por
 `scripts/miniyaml.py` e os painéis Grafana por `json`. Os mesmos quatro comandos
-acima são o que `.github/workflows/ci.yml` e `.gitlab-ci.yml` executam, sem
+acima são o que `ci/github-actions-ci.yml` e `.gitlab-ci.yml` executam, sem
 nenhum segredo e sem nenhum passo que dependa de rede externa além do checkout
 das imagens.
 

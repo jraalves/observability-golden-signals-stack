@@ -1,0 +1,62 @@
+# CI do stack de observabilidade. Mesmos passos do .gitlab-ci.yml: validar a
+# estrutura versionada, compilar, rodar os testes unitarios e o smoke-test com a
+# aplicacao de exemplo. Nenhum segredo e necessario: o ambiente e local, os dados
+# sao sintetico e a app de exemplo e stdlib apenas.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualidade:
+    name: validar, compilar, testar, smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PORT: "18080"
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: preparar python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: dependencia zero (contrato: stdlib only)
+        run: |
+          python3 - <<'PY'
+          linhas = [l.strip() for l in open("app/requirements.txt", encoding="utf-8")]
+          ativas = [l for l in linhas if l and not l.startswith("#")]
+          print("app/requirements.txt linhas ativas:", len(ativas))
+          raise SystemExit(1 if ativas else 0)
+          PY
+
+      - name: compilacao (py_compile em tudo que e python)
+        run: python3 -m py_compile app/*.py scripts/*.py tests/*.py
+
+      - name: validador estrutural do repositorio
+        run: python3 scripts/validate.py
+
+      - name: conta de cardinalidade dentro do teto
+        run: python3 scripts/custo-cardinalidade.py --check
+
+      - name: testes unitarios (sem rede, sem container)
+        run: python3 -m unittest discover -s tests -v
+
+      - name: smoke-test da aplicacao de exemplo
+        run: bash scripts/smoke-test.sh
+
+      - name: sem artefato de build para publicar
+        run: echo "nada para publicar: este repositorio versiona configuracao, nao binario"
