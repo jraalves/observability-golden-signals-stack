@@ -1,5 +1,42 @@
 # observability-golden-signals-stack
 
+## Comece por aqui: 2 minutos, sem Docker
+
+`make ci` roda os três portões que o workflow público executa, todos offline:
+
+```bash
+git clone https://github.com/jraalves/observability-golden-signals-stack.git
+cd observability-golden-signals-stack
+make validate   # contrato estrutural: YAML, regras, dashboards, runbooks, termos protegidos
+make test       # 100 testes
+make cost       # custo de cardinalidade de labels contra o teto auto-imposto
+make ci         # os tres juntos (e o que o Actions roda)
+```
+
+Saída real em um clone limpo, hoje:
+
+```text
+$ make validate
+  recording rules  81
+  alerts           35
+  datasources      3
+  dashboards       3
+  painéis          31
+
+escopos verificados: 14
+
+resultado: OK - YAML/JSON estruturalmente validos e contrato atendido
+
+$ make test
+Ran 100 tests in 0.343s
+OK
+```
+
+Para subir o stack completo (Prometheus + Loki + Tempo + Grafana + OTel collector):
+`docker compose up -d` e abrir `http://localhost:3000`. Nada aqui exige credencial nem
+rede externa além de puxar as imagens.
+
+
 [![ci](https://github.com/jraalves/observability-golden-signals-stack/actions/workflows/ci.yml/badge.svg)](https://github.com/jraalves/observability-golden-signals-stack/actions/workflows/ci.yml) · `make ci` local: validate + 100 testes + cardinalidade, exit 0 · ativo desde 26/11/2026 (run #1, success)
 
 Stack de observabilidade completo, aberto e reprodutível para estudar os **golden
