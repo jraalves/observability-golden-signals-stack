@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: dependencia zero (contrato: stdlib only)
+      - name: "dependencia zero (contrato: stdlib only)"
         run: |
           python3 - <<'PY'
           linhas = [l.strip() for l in open("app/requirements.txt", encoding="utf-8")]
@@ -59,4 +59,4 @@ jobs:
         run: bash scripts/smoke-test.sh
 
       - name: sem artefato de build para publicar
-        run: echo "nada para publicar: este repositorio versiona configuracao, nao binario"
+        run: "echo 'nada para publicar: este repositorio versiona configuracao, nao binario'"
