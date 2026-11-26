@@ -1,5 +1,7 @@
 # observability-golden-signals-stack
 
+[![ci](https://github.com/jraalves/observability-golden-signals-stack/actions/workflows/ci.yml/badge.svg)](https://github.com/jraalves/observability-golden-signals-stack/actions/workflows/ci.yml) · `make ci` local: validate + 100 testes + cardinalidade, exit 0 · ativo desde 26/11/2026 (run #1, success)
+
 Stack de observabilidade completo, aberto e reprodutível para estudar os **golden
 signals** (latência, tráfego, erro e saturação) do pedido até o alerta: aplicação
 de exemplo em Python sem nenhuma dependência de terceira parte, OpenTelemetry
